@@ -1,95 +1,186 @@
-from fastapi import FastAPI, Query
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from curl_cffi import requests as curl_requests
+"""
+OLX.bg parser — поиск свежих объявлений для перепродажи.
+
+Главное отличие от старой версии: дата регистрации продавца, город, состояние,
+цена и т.д. берутся прямо из ответа API (поле user.created), а не парсятся
+отдельным запросом на страницу каждого профиля. Поэтому работает в разы быстрее
+и меньше шансов получить бан.
+"""
+import asyncio
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
-import re
+from pathlib import Path
+from typing import Any, Optional
 
-app = FastAPI(title="OLX.bg Parser")
+from curl_cffi.requests import AsyncSession
+from fastapi import FastAPI, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-OLX_API = "https://www.olx.bg/api/v1/offers/"
+BASE = "https://www.olx.bg"
+API = f"{BASE}/api/v1"
+PAGE_SIZE = 50          # максимум, который отдаёт API за один запрос
+MAX_PAGES = 5           # сколько страниц максимум просматривать за один поиск
+CACHE_TTL = 60          # секунд, кэш одинаковых запросов
+SORTS = {
+    "new": "created_at:desc",
+    "price_asc": "filter_float_price:asc",
+    "price_desc": "filter_float_price:desc",
+}
+
+HERE = Path(__file__).parent
+session: Optional[AsyncSession] = None
+_cache: dict[Any, tuple[float, Any]] = {}
+_categories: dict[int, str] = {}
+_ads_count: dict[Any, tuple[float, Optional[int]]] = {}
 
 
-async def fetch_offers(query: str = "", limit: int = 40):
-    params = {
-        "offset": 0,
-        "limit": min(limit, 50),
-        "query": query,
-        "sort_by": "created_at:desc",
-    }
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global session
+    # curl_cffi имитирует TLS-отпечаток настоящего Chrome — обычный requests/httpx OLX режет
+    session = AsyncSession(
+        impersonate="chrome",
+        timeout=25,
+        headers={"Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8", "Accept": "application/json"},
+    )
+    yield
+    await session.close()
+
+
+app = FastAPI(title="OLX.bg Parser", lifespan=lifespan)
+
+
+class OlxError(Exception):
+    pass
+
+
+async def olx_get(path: str, params: Optional[dict] = None) -> dict:
+    key = (path, tuple(sorted((params or {}).items())))
+    hit = _cache.get(key)
+    if hit and time.time() - hit[0] < CACHE_TTL:
+        return hit[1]
     try:
-        # curl_cffi имитирует TLS-отпечаток реального Chrome,
-        # что помогает обойти защиту OLX от ботов
-        r = curl_requests.get(
-            OLX_API,
-            params=params,
-            impersonate="chrome",
-            headers={"Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8"},
-            timeout=25,
-        )
+        r = await session.get(f"{API}{path}", params=params)
     except Exception as e:
-        print(f"[OLX] Request failed: {e}")
-        return []
-
+        raise OlxError(f"Не удалось подключиться к OLX: {e}")
     if r.status_code != 200:
-        print(f"[OLX] API returned {r.status_code}: {r.text[:300]}")
-        return []
-
+        raise OlxError(f"OLX вернул {r.status_code}: {r.text[:200]}")
     try:
         data = r.json()
-    except Exception as e:
-        print(f"[OLX] JSON parse failed: {e}")
-        return []
-
-    return data.get("data", [])
-
-
-async def fetch_seller_reg_date(user_id: int) -> Optional[datetime]:
-    """Пытается вытащить дату регистрации со страницы профиля продавца."""
-    url = f"https://www.olx.bg/ads/user/{user_id}/"
-    try:
-        r = curl_requests.get(
-            url,
-            impersonate="chrome",
-            headers={"Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return None
-        html = r.text
-        # Паттерн 1: текст "Регистриран на DD.MM.YYYY"
-        m = re.search(r'Регистриран на\s*(\d{2}\.\d{2}\.\d{4})', html)
-        if m:
-            return datetime.strptime(m.group(1), "%d.%m.%Y")
-        # Паттерн 2: JSON-LD dateCreated
-        m = re.search(r'"dateCreated"\s*:\s*"([^"]+)"', html)
-        if m:
-            return datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
     except Exception:
+        raise OlxError("OLX вернул не JSON (возможно, блокировка/капча)")
+    _cache[key] = (time.time(), data)
+    if len(_cache) > 300:  # простая защита от разрастания
+        for k in sorted(_cache, key=lambda k: _cache[k][0])[:100]:
+            _cache.pop(k, None)
+    return data
+
+
+def parse_dt(s: Optional[str]) -> Optional[datetime]:
+    if not s:
         return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def ago(dt: Optional[datetime]) -> str:
+    if not dt:
+        return ""
+    sec = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if sec < 90:
+        return "только что"
+    if sec < 3600:
+        return f"{sec // 60} мин. назад"
+    if sec < 86400:
+        return f"{sec // 3600} ч. назад"
+    return f"{sec // 86400} дн. назад"
+
+
+def get_param(item: dict, key: str) -> Optional[dict]:
+    for p in item.get("params") or []:
+        if p.get("key") == key:
+            return p
     return None
 
 
-def format_date(dt: Optional[datetime]) -> str:
-    if not dt:
+async def category_name(cat_id: Optional[int]) -> str:
+    if not cat_id:
         return "—"
-    return dt.strftime("%d-%m-%Y в %H:%M")
+    if cat_id in _categories:
+        return _categories[cat_id]
+    try:
+        data = await olx_get(f"/categories/{cat_id}")
+        name = (data.get("data") or {}).get("name") or "—"
+    except OlxError:
+        name = "—"
+    _categories[cat_id] = name
+    return name
 
 
-def days_ago(dt: Optional[datetime]) -> str:
-    if not dt:
-        return ""
-    now = datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    delta = now - dt
-    if delta.days > 0:
-        return f"{delta.days} дн. назад"
-    hours = delta.seconds // 3600
-    if hours > 0:
-        return f"{hours} ч. назад"
-    return "только что"
+async def seller_ads_count(user_id: Any, sem: asyncio.Semaphore) -> Optional[int]:
+    hit = _ads_count.get(user_id)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    async with sem:
+        try:
+            data = await olx_get("/offers/", {"user_id": user_id, "limit": 1})
+            total = (data.get("metadata") or {}).get("total_elements")
+        except OlxError:
+            total = None
+    _ads_count[user_id] = (time.time(), total)
+    return total
+
+
+def normalize(item: dict) -> dict:
+    user = item.get("user") or {}
+    created = parse_dt(item.get("created_time") or item.get("last_refresh_time"))
+    reg = parse_dt(user.get("created"))
+
+    price_p = get_param(item, "price") or {}
+    pv = price_p.get("value") or {}
+    state_p = get_param(item, "state") or {}
+
+    loc = item.get("location") or {}
+    city = (loc.get("city") or {}).get("name") or ""
+    region = (loc.get("region") or {}).get("name") or ""
+
+    photo = ""
+    photos = item.get("photos") or []
+    if photos:
+        photo = (photos[0].get("link") or "").replace("{width}", "600").replace("{height}", "450")
+
+    delivery = ((item.get("delivery") or {}).get("rock") or {}).get("active")
+    seller_id = user.get("uuid") or user.get("id")
+
+    return {
+        "id": item.get("id"),
+        "title": item.get("title", ""),
+        "price": pv.get("label") or "—",
+        "price_value": pv.get("value"),
+        "negotiable": bool(pv.get("negotiable")),
+        "condition": (state_p.get("value") or {}).get("label") or "",
+        "city": ", ".join(x for x in (city, region) if x),
+        "published": created.astimezone().strftime("%d.%m.%Y %H:%M") if created else "—",
+        "published_ago": ago(created),
+        "delivery": bool(delivery),
+        "is_business": bool(item.get("business")),
+        "seller_name": user.get("name") or "—",
+        "seller_reg": reg.strftime("%d.%m.%Y") if reg else "—",
+        "seller_reg_year": reg.year if reg else None,
+        "seller_ads_count": None,
+        "ad_url": item.get("url") or f"{BASE}/d/ad/{item.get('id')}.html",
+        "seller_url": f"{BASE}/ads/user/{seller_id}/" if seller_id else "",
+        "photo_url": photo,
+        "category_id": (item.get("category") or {}).get("id"),
+        "category": "—",
+        "_user_id": user.get("id"),
+        "_created": created,
+    }
 
 
 @app.get("/health")
@@ -100,80 +191,109 @@ async def health():
 @app.get("/api/search")
 async def search(
     q: str = "",
-    limit: int = 30,
-    min_seller_year: Optional[int] = Query(None, description="Минимальный год регистрации продавца"),
-    max_seller_year: Optional[int] = Query(None, description="Максимальный год регистрации продавца"),
-    max_listing_age_days: Optional[int] = Query(None, description="Максимальный возраст объявления в днях"),
+    limit: int = Query(30, ge=1, le=100),
+    sort: str = "new",
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    min_seller_year: Optional[int] = None,
+    max_seller_year: Optional[int] = None,
+    max_listing_age_days: Optional[float] = None,
+    only_delivery: bool = False,
+    only_private: bool = False,
+    with_ads_count: bool = False,
 ):
-    raw = await fetch_offers(query=q, limit=limit)
-    results = []
+    params: dict[str, Any] = {
+        "limit": PAGE_SIZE,
+        "query": q,
+        "sort_by": SORTS.get(sort, SORTS["new"]),
+    }
+    if min_price is not None:
+        params["filter_float_price:from"] = min_price
+    if max_price is not None:
+        params["filter_float_price:to"] = max_price
+
     now = datetime.now(timezone.utc)
+    results: list[dict] = []
+    scanned = 0
+    error = None
 
-    for item in raw:
-        created_str = item.get("created_time") or item.get("last_refresh_time")
-        created_dt = None
-        if created_str:
-            try:
-                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-            except Exception:
-                pass
+    for page in range(MAX_PAGES):
+        try:
+            data = await olx_get("/offers/", {**params, "offset": page * PAGE_SIZE})
+        except OlxError as e:
+            error = str(e)
+            break
+        raw = data.get("data") or []
+        if not raw:
+            break
 
-        # Фильтр по свежести объявления
-        if max_listing_age_days is not None and created_dt:
-            if (now - created_dt).days > max_listing_age_days:
+        stop = False
+        for item in raw:
+            scanned += 1
+            ad = normalize(item)
+
+            # объявления идут от новых к старым — как только вышли за лимит свежести, дальше смысла нет
+            if max_listing_age_days is not None and ad["_created"] and sort == "new":
+                if (now - ad["_created"]).total_seconds() > max_listing_age_days * 86400:
+                    stop = True
+                    break
+            elif max_listing_age_days is not None and ad["_created"]:
+                if (now - ad["_created"]).total_seconds() > max_listing_age_days * 86400:
+                    continue
+
+            if only_delivery and not ad["delivery"]:
                 continue
-
-        user_id = item.get("user_id")
-        seller_reg = None
-        if user_id:
-            seller_reg = await fetch_seller_reg_date(user_id)
-
-        # Фильтр по году регистрации продавца
-        if min_seller_year or max_seller_year:
-            if seller_reg is None:
+            if only_private and ad["is_business"]:
                 continue
-            if min_seller_year and seller_reg.year < min_seller_year:
-                continue
-            if max_seller_year and seller_reg.year > max_seller_year:
-                continue
+            if min_seller_year or max_seller_year:
+                y = ad["seller_reg_year"]
+                if y is None:
+                    continue
+                if min_seller_year and y < min_seller_year:
+                    continue
+                if max_seller_year and y > max_seller_year:
+                    continue
 
-        ad_url = item.get("url") or f"https://www.olx.bg/d/ad/{item.get('id')}.html"
-        seller_url = f"https://www.olx.bg/ads/user/{user_id}/" if user_id else ""
-        chat_url = f"https://www.olx.bg/d/ad/{item.get('id')}.html#chat"
+            results.append(ad)
+            if len(results) >= limit:
+                stop = True
+                break
+        if stop or len(raw) < PAGE_SIZE:
+            break
 
-        photo_url = ""
-        photos = item.get("photos") or []
-        if photos:
-            photo_url = photos[0].get("link") or photos[0].get("url") or ""
+    # категории (кэшируются) и, по желанию, количество объявлений продавца
+    names = await asyncio.gather(*(category_name(a["category_id"]) for a in results))
+    for a, n in zip(results, names):
+        a["category"] = n
 
-        cats = item.get("category") or []
-        category_name = cats[-1].get("name") if cats else "—"
+    if with_ads_count and results:
+        sem = asyncio.Semaphore(5)
+        counts = await asyncio.gather(*(seller_ads_count(a["_user_id"], sem) for a in results if a["_user_id"]))
+        it = iter(counts)
+        for a in results:
+            if a["_user_id"]:
+                a["seller_ads_count"] = next(it)
 
-        results.append({
-            "country": "🇵🇹",
-            "category": category_name,
-            "title": item.get("title", ""),
-            "price": item.get("price", {}).get("display_value", "—"),
-            "published": format_date(created_dt),
-            "published_ago": days_ago(created_dt),
-            "delivery": "Да" if item.get("delivery") else "",
-            "seller_name": item.get("user_name", "—"),
-            "seller_ads_count": "—",
-            "seller_reg": seller_reg.strftime("%d-%m-%Y") if seller_reg else "—",
-            "ad_url": ad_url,
-            "seller_url": seller_url,
-            "chat_url": chat_url,
-            "photo_url": photo_url,
-            "views": item.get("views", 0),
-        })
+    for a in results:
+        a.pop("_user_id", None)
+        a.pop("_created", None)
 
-    return results
+    return {"items": results, "scanned": scanned, "error": error}
 
 
-# Отдача статического фронтенда
-app.mount("/static", StaticFiles(directory="static"), name="static")
+@app.get("/api/raw")
+async def raw(q: str = ""):
+    """Отладка: сырой первый оффер из API OLX — чтобы посмотреть реальные поля."""
+    try:
+        data = await olx_get("/offers/", {"limit": 1, "query": q, "sort_by": SORTS["new"]})
+    except OlxError as e:
+        return {"error": str(e)}
+    return (data.get("data") or [None])[0]
+
+
+app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    return FileResponse(HERE / "static" / "index.html")
