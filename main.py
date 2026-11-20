@@ -1,19 +1,12 @@
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import httpx
+from curl_cffi import requests as curl_requests
 from datetime import datetime, timezone
 from typing import Optional
 import re
-import os
 
 app = FastAPI(title="OLX.bg Parser")
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8",
-}
 
 OLX_API = "https://www.olx.bg/api/v1/offers/"
 
@@ -25,10 +18,30 @@ async def fetch_offers(query: str = "", limit: int = 40):
         "query": query,
         "sort_by": "created_at:desc",
     }
-    async with httpx.AsyncClient(timeout=20, headers=HEADERS, follow_redirects=True) as client:
-        r = await client.get(OLX_API, params=params)
-        r.raise_for_status()
+    try:
+        # curl_cffi имитирует TLS-отпечаток реального Chrome,
+        # что помогает обойти защиту OLX от ботов
+        r = curl_requests.get(
+            OLX_API,
+            params=params,
+            impersonate="chrome",
+            headers={"Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8"},
+            timeout=25,
+        )
+    except Exception as e:
+        print(f"[OLX] Request failed: {e}")
+        return []
+
+    if r.status_code != 200:
+        print(f"[OLX] API returned {r.status_code}: {r.text[:300]}")
+        return []
+
+    try:
         data = r.json()
+    except Exception as e:
+        print(f"[OLX] JSON parse failed: {e}")
+        return []
+
     return data.get("data", [])
 
 
@@ -36,9 +49,15 @@ async def fetch_seller_reg_date(user_id: int) -> Optional[datetime]:
     """Пытается вытащить дату регистрации со страницы профиля продавца."""
     url = f"https://www.olx.bg/ads/user/{user_id}/"
     try:
-        async with httpx.AsyncClient(timeout=12, headers=HEADERS, follow_redirects=True) as client:
-            r = await client.get(url)
-            html = r.text
+        r = curl_requests.get(
+            url,
+            impersonate="chrome",
+            headers={"Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        html = r.text
         # Паттерн 1: текст "Регистриран на DD.MM.YYYY"
         m = re.search(r'Регистриран на\s*(\d{2}\.\d{2}\.\d{4})', html)
         if m:
@@ -71,6 +90,11 @@ def days_ago(dt: Optional[datetime]) -> str:
     if hours > 0:
         return f"{hours} ч. назад"
     return "только что"
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.get("/api/search")
