@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OLX.bg Parser</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 20px auto; padding: 0 16px; background: #f0f2f5; color: #1a1a1a; }
+    h2 { margin-bottom: 4px; }
+    .subtitle { color: #666; font-size: 14px; margin-bottom: 18px; }
+    .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; background: #fff; padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    input, select, button { padding: 10px 12px; border: 1px solid #d0d0d0; border-radius: 8px; font-size: 14px; }
+    input:focus, select:focus { outline: none; border-color: #002f34; }
+    button { background: #002f34; color: #fff; cursor: pointer; border: none; font-weight: 600; transition: opacity .15s; }
+    button:hover { opacity: .85; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .card { background: #fff; border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); white-space: pre-wrap; font-family: 'SF Mono', 'Consolas', monospace; font-size: 13.5px; line-height: 1.55; }
+    .card a { color: #002f34; text-decoration: none; border-bottom: 1px dashed #002f34; }
+    .card a:hover { border-bottom-style: solid; }
+    .loading { text-align: center; padding: 40px; color: #888; }
+    .empty { text-align: center; padding: 40px; color: #888; background: #fff; border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <h2>OLX.bg — самые новые объявления</h2>
+  <div class="subtitle">Бесплатный деплой на Render. Фильтры по свежести и году регистрации продавца.</div>
+
+  <div class="filters">
+    <input id="q" placeholder="Поиск (например: PS5)" style="flex:2;min-width:200px">
+    <select id="minYear" style="flex:1;min-width:140px">
+      <option value="">Год рег. продавца: любой</option>
+      <option value="2026">2026</option>
+      <option value="2025">2025</option>
+      <option value="2024">2024</option>
+      <option value="2023">2023</option>
+      <option value="2022">2022</option>
+    </select>
+    <select id="maxAge" style="flex:1;min-width:140px">
+      <option value="">Свежесть: любая</option>
+      <option value="1">За 24 часа</option>
+      <option value="3">За 3 дня</option>
+      <option value="7">За 7 дней</option>
+      <option value="30">За 30 дней</option>
+    </select>
+    <button id="btn" onclick="load()">Показать</button>
+  </div>
+
+  <div id="results"><div class="empty">Нажмите «Показать», чтобы загрузить объявления</div></div>
+
+<script>
+async function load() {
+  const btn = document.getElementById('btn');
+  const container = document.getElementById('results');
+  btn.disabled = true;
+  btn.textContent = 'Загрузка…';
+  container.innerHTML = '<div class="loading">Загрузка объявлений… (может занять 10–20 секунд из-за парсинга профилей)</div>';
+
+  const q = document.getElementById('q').value.trim();
+  const minYear = document.getElementById('minYear').value;
+  const maxAge = document.getElementById('maxAge').value;
+  const params = new URLSearchParams({ q, limit: 25 });
+  if (minYear) params.set('min_seller_year', minYear);
+  if (maxAge) params.set('max_listing_age_days', maxAge);
+
+  try {
+    const res = await fetch('/api/search?' + params);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+
+    if (!data.length) {
+      container.innerHTML = '<div class="empty">Ничего не найдено. Попробуйте изменить фильтры.</div>';
+      return;
+    }
+
+    container.innerHTML = data.map(item => `
+      <div class="card">Страна: ${item.country}
+
+Категория: ${item.category}
+
+Название: ${item.title}
+Цена: ${item.price}
+
+Публикация: ${item.published} (${item.published_ago})
+
+Доставка: ${item.delivery || '—'}
+
+Продавец: ${item.seller_name}
+
+┌ Объявления: ${item.seller_ads_count}
+└ Регистрация: ${item.seller_reg}
+
+<a href="${item.ad_url}" target="_blank" rel="noopener">Ссылка на объявление</a>
+<a href="${item.seller_url}" target="_blank" rel="noopener">Ссылка на продавца</a>
+<a href="${item.chat_url}" target="_blank" rel="noopener">Ссылка на чат</a>
+${item.photo_url ? `<a href="${item.photo_url}" target="_blank" rel="noopener">Ссылка на фото</a>` : ''}
+
+${item.views} просмотров</div>
+    `).join('');
+  } catch (e) {
+    container.innerHTML = '<div class="empty">Ошибка загрузки: ' + e.message + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Показать';
+  }
+}
+</script>
+</body>
+</html>
