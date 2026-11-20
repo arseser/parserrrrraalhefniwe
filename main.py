@@ -7,6 +7,7 @@ OLX.bg parser — поиск свежих объявлений для переп
 и меньше шансов получить бан.
 """
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -40,8 +41,12 @@ _ads_count: dict[Any, tuple[float, Optional[int]]] = {}
 async def lifespan(app: FastAPI):
     global session
     # curl_cffi имитирует TLS-отпечаток настоящего Chrome — обычный requests/httpx OLX режет
+    # Если OLX блокирует IP хостинга (403) — задайте переменную PROXY_URL,
+    # например http://user:pass@host:port (лучше резидентный/мобильный прокси)
+    proxy = os.environ.get("PROXY_URL") or None
     session = AsyncSession(
         impersonate="chrome",
+        proxies={"http": proxy, "https": proxy} if proxy else None,
         timeout=25,
         headers={"Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8", "Accept": "application/json"},
     )
