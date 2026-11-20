@@ -1,109 +1,195 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OLX.bg Parser</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 20px auto; padding: 0 16px; background: #f0f2f5; color: #1a1a1a; }
-    h2 { margin-bottom: 4px; }
-    .subtitle { color: #666; font-size: 14px; margin-bottom: 18px; }
-    .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; background: #fff; padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-    input, select, button { padding: 10px 12px; border: 1px solid #d0d0d0; border-radius: 8px; font-size: 14px; }
-    input:focus, select:focus { outline: none; border-color: #002f34; }
-    button { background: #002f34; color: #fff; cursor: pointer; border: none; font-weight: 600; transition: opacity .15s; }
-    button:hover { opacity: .85; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .card { background: #fff; border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); white-space: pre-wrap; font-family: 'SF Mono', 'Consolas', monospace; font-size: 13.5px; line-height: 1.55; }
-    .card a { color: #002f34; text-decoration: none; border-bottom: 1px dashed #002f34; }
-    .card a:hover { border-bottom-style: solid; }
-    .loading { text-align: center; padding: 40px; color: #888; }
-    .empty { text-align: center; padding: 40px; color: #888; background: #fff; border-radius: 12px; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OLX.bg — свежие объявления</title>
+<style>
+  :root {
+    --bg: #eef1f0; --panel: #fff; --ink: #14201f; --muted: #66726f;
+    --line: #d9e0de; --accent: #00443f; --hot: #c4411f; --ok: #1d7a4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121817; --panel: #1b2321; --ink: #e8efed; --muted: #92a09c; --line: #2b3633; --accent: #5fd0c3; --hot: #ff8a65; --ok: #6fd6a2; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  main { max-width: 1000px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+
+  form { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-bottom: 14px; }
+  form .wide { grid-column: span 3; } form .mid { grid-column: span 2; } form .full { grid-column: 1 / -1; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+  input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px; width: 100%; }
+  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .checks label { flex-direction: row; align-items: center; gap: 7px; color: var(--ink); font-size: 14px; }
+  .checks input { width: auto; }
+  button { font: inherit; font-weight: 600; background: var(--accent); color: var(--panel); border: 0; border-radius: 7px; padding: 10px 18px; cursor: pointer; }
+  @media (prefers-color-scheme: dark) { button { color: #0b1210; } }
+  button:disabled { opacity: .55; cursor: wait; }
+  .status { color: var(--muted); font-size: 13.5px; margin: 0 2px 10px; min-height: 20px; }
+  .status.err { color: var(--hot); }
+
+  .list { display: grid; gap: 10px; }
+  .item { display: grid; grid-template-columns: 150px 1fr; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .item img, .item .noimg { width: 150px; height: 100%; min-height: 130px; object-fit: cover; background: var(--line); display: block; }
+  .body { padding: 12px 14px; min-width: 0; }
+  .top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .title { font-weight: 600; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+  .title:hover { text-decoration: underline; }
+  .price { font-weight: 700; white-space: nowrap; font-size: 17px; }
+  .meta { color: var(--muted); font-size: 13.5px; margin-top: 3px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.new { color: var(--hot); border-color: var(--hot); }
+  .tag.good { color: var(--ok); border-color: var(--ok); }
+  .links { margin-top: 8px; font-size: 13.5px; display: flex; gap: 16px; }
+  .links a { color: var(--accent); }
+  .empty { text-align: center; color: var(--muted); padding: 40px 10px; background: var(--panel); border: 1px dashed var(--line); border-radius: 10px; }
+
+  @media (max-width: 700px) {
+    form { grid-template-columns: 1fr 1fr; } form .wide, form .mid, form .full { grid-column: 1 / -1; }
+    .item { grid-template-columns: 96px 1fr; } .item img, .item .noimg { width: 96px; }
+    .top { flex-direction: column; gap: 2px; }
+  }
+</style>
 </head>
 <body>
-  <h2>OLX.bg — самые новые объявления</h2>
-  <div class="subtitle">Бесплатный деплой на Render. Фильтры по свежести и году регистрации продавца.</div>
+<main>
+  <h1>OLX.bg — свежие объявления</h1>
+  <p class="sub">Новые объявления с фильтрами по цене, свежести и году регистрации продавца.</p>
 
-  <div class="filters">
-    <input id="q" placeholder="Поиск (например: PS5)" style="flex:2;min-width:200px">
-    <select id="minYear" style="flex:1;min-width:140px">
-      <option value="">Год рег. продавца: любой</option>
-      <option value="2026">2026</option>
-      <option value="2025">2025</option>
-      <option value="2024">2024</option>
-      <option value="2023">2023</option>
-      <option value="2022">2022</option>
-    </select>
-    <select id="maxAge" style="flex:1;min-width:140px">
-      <option value="">Свежесть: любая</option>
-      <option value="1">За 24 часа</option>
-      <option value="3">За 3 дня</option>
-      <option value="7">За 7 дней</option>
-      <option value="30">За 30 дней</option>
-    </select>
-    <button id="btn" onclick="load()">Показать</button>
-  </div>
+  <form id="f">
+    <label class="wide">Поиск <input name="q" placeholder="например: PS5, iPhone 13, велосипед"></label>
+    <label class="mid">Сортировка
+      <select name="sort">
+        <option value="new">Сначала новые</option>
+        <option value="price_asc">Сначала дешёвые</option>
+        <option value="price_desc">Сначала дорогие</option>
+      </select>
+    </label>
+    <label class="mid">Цена от <input name="min_price" type="number" min="0" inputmode="decimal"></label>
+    <label class="mid">Цена до <input name="max_price" type="number" min="0" inputmode="decimal"></label>
+    <label class="mid">Свежесть
+      <select name="max_listing_age_days">
+        <option value="">любая</option>
+        <option value="0.0417">за 1 час</option>
+        <option value="0.25">за 6 часов</option>
+        <option value="1">за 24 часа</option>
+        <option value="3">за 3 дня</option>
+        <option value="7">за 7 дней</option>
+        <option value="30">за 30 дней</option>
+      </select>
+    </label>
+    <label class="mid">Продавец зарегистрирован с года
+      <select name="min_seller_year" id="minYear"><option value="">любой</option></select>
+    </label>
+    <label class="mid">…по год
+      <select name="max_seller_year" id="maxYear"><option value="">любой</option></select>
+    </label>
+    <label class="mid">Сколько показать
+      <select name="limit"><option>20</option><option selected>30</option><option>50</option><option>100</option></select>
+    </label>
+    <div class="full checks">
+      <label><input type="checkbox" name="only_private" value="true"> Только частные продавцы</label>
+      <label><input type="checkbox" name="only_delivery" value="true"> Только с доставкой</label>
+      <label><input type="checkbox" name="with_ads_count" value="true"> Показать число объявлений продавца (медленнее)</label>
+    </div>
+    <div class="full"><button id="btn" type="submit">Найти</button></div>
+  </form>
 
-  <div id="results"><div class="empty">Нажмите «Показать», чтобы загрузить объявления</div></div>
+  <div id="status" class="status" role="status"></div>
+  <div id="list" class="list"><div class="empty">Задайте фильтры и нажмите «Найти».</div></div>
+</main>
 
 <script>
-async function load() {
-  const btn = document.getElementById('btn');
-  const container = document.getElementById('results');
-  btn.disabled = true;
-  btn.textContent = 'Загрузка…';
-  container.innerHTML = '<div class="loading">Загрузка объявлений… (может занять 10–20 секунд из-за парсинга профилей)</div>';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safeUrl = u => /^https?:\/\//.test(u || '') ? esc(u) : '';
 
-  const q = document.getElementById('q').value.trim();
-  const minYear = document.getElementById('minYear').value;
-  const maxAge = document.getElementById('maxAge').value;
-  const params = new URLSearchParams({ q, limit: 25 });
-  if (minYear) params.set('min_seller_year', minYear);
-  if (maxAge) params.set('max_listing_age_days', maxAge);
+// годы для фильтров
+const thisYear = new Date().getFullYear();
+for (let y = thisYear; y >= 2010; y--) {
+  for (const id of ['#minYear', '#maxYear']) $(id).insertAdjacentHTML('beforeend', `<option value="${y}">${y}</option>`);
+}
 
+// запоминаем фильтры между визитами
+const form = $('#f');
+try {
+  const saved = JSON.parse(localStorage.getItem('olx-filters') || '{}');
+  for (const [k, v] of Object.entries(saved)) {
+    const el = form.elements[k];
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = v === true; else el.value = v;
+  }
+} catch {}
+
+function render(it) {
+  const newSeller = it.seller_reg_year && it.seller_reg_year >= thisYear - 1;
+  const tags = [];
+  if (newSeller) tags.push(`<span class="tag new">новый продавец ${it.seller_reg_year}</span>`);
+  if (it.condition) tags.push(`<span class="tag">${esc(it.condition)}</span>`);
+  if (it.delivery) tags.push(`<span class="tag good">доставка</span>`);
+  if (it.negotiable) tags.push(`<span class="tag">торг</span>`);
+  if (it.is_business) tags.push(`<span class="tag">бизнес</span>`);
+  const ads = it.seller_ads_count != null ? ` · объявлений: ${it.seller_ads_count}` : '';
+  const img = safeUrl(it.photo_url);
+  return `
+  <article class="item">
+    ${img ? `<img src="${img}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<div class="noimg"></div>'}
+    <div class="body">
+      <div class="top">
+        <a class="title" href="${safeUrl(it.ad_url)}" target="_blank" rel="noopener">${esc(it.title)}</a>
+        <span class="price">${esc(it.price)}</span>
+      </div>
+      <div class="meta">${esc(it.category)}${it.city ? ' · ' + esc(it.city) : ''}</div>
+      <div class="meta">${esc(it.published)} (${esc(it.published_ago)})</div>
+      <div class="meta">Продавец: ${esc(it.seller_name)} · с ${esc(it.seller_reg)}${ads}</div>
+      <div class="tags">${tags.join('')}</div>
+      <div class="links">
+        <a href="${safeUrl(it.ad_url)}" target="_blank" rel="noopener">Открыть объявление</a>
+        ${it.seller_url ? `<a href="${safeUrl(it.seller_url)}" target="_blank" rel="noopener">Профиль продавца</a>` : ''}
+      </div>
+    </div>
+  </article>`;
+}
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('#btn'), status = $('#status'), list = $('#list');
+  const fd = new FormData(form);
+  const params = new URLSearchParams();
+  const saved = {};
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    saved[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  for (const [k, v] of fd.entries()) if (String(v).trim() !== '') params.set(k, String(v).trim());
+  try { localStorage.setItem('olx-filters', JSON.stringify(saved)); } catch {}
+
+  btn.disabled = true; btn.textContent = 'Ищу…';
+  status.className = 'status'; status.textContent = 'Загружаю объявления…';
   try {
     const res = await fetch('/api/search?' + params);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) throw new Error('сервер ответил ' + res.status);
     const data = await res.json();
-
-    if (!data.length) {
-      container.innerHTML = '<div class="empty">Ничего не найдено. Попробуйте изменить фильтры.</div>';
-      return;
+    if (data.error) {
+      status.className = 'status err';
+      status.textContent = 'Ошибка OLX: ' + data.error;
+    } else {
+      status.textContent = `Найдено: ${data.items.length} (просмотрено объявлений: ${data.scanned})`;
     }
-
-    container.innerHTML = data.map(item => `
-      <div class="card">Страна: ${item.country}
-
-Категория: ${item.category}
-
-Название: ${item.title}
-Цена: ${item.price}
-
-Публикация: ${item.published} (${item.published_ago})
-
-Доставка: ${item.delivery || '—'}
-
-Продавец: ${item.seller_name}
-
-┌ Объявления: ${item.seller_ads_count}
-└ Регистрация: ${item.seller_reg}
-
-<a href="${item.ad_url}" target="_blank" rel="noopener">Ссылка на объявление</a>
-<a href="${item.seller_url}" target="_blank" rel="noopener">Ссылка на продавца</a>
-<a href="${item.chat_url}" target="_blank" rel="noopener">Ссылка на чат</a>
-${item.photo_url ? `<a href="${item.photo_url}" target="_blank" rel="noopener">Ссылка на фото</a>` : ''}
-
-${item.views} просмотров</div>
-    `).join('');
-  } catch (e) {
-    container.innerHTML = '<div class="empty">Ошибка загрузки: ' + e.message + '</div>';
+    list.innerHTML = data.items.length ? data.items.map(render).join('')
+      : '<div class="empty">Ничего не найдено. Ослабьте фильтры — например, уберите год регистрации или увеличьте срок свежести.</div>';
+  } catch (err) {
+    status.className = 'status err';
+    status.textContent = 'Не удалось загрузить: ' + err.message;
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Показать';
+    btn.disabled = false; btn.textContent = 'Найти';
   }
-}
+});
 </script>
 </body>
 </html>
